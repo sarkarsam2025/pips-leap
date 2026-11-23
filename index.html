@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Pip's Leap</title>
+<meta name="description" content="A simple, original side-scrolling platform game. Run, jump, stomp the Grumbles and reach the exit.">
+<style>
+  :root { --bg: #1b1631; --fg: #f4f0ff; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none;
+  }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; border-radius: 6px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+  #touch {
+    position: fixed; left: 0; right: 0; bottom: 0; display: none;
+    justify-content: space-between; align-items: flex-end; padding: 16px; pointer-events: none;
+  }
+  #touch .group { display: flex; gap: 14px; }
+  .btn {
+    pointer-events: auto; width: 74px; height: 74px; border-radius: 50%;
+    background: rgba(255,255,255,.16); border: 2px solid rgba(255,255,255,.35);
+    color: #fff; font-size: 30px; display: flex; align-items: center; justify-content: center;
+    touch-action: none;
+  }
+  .btn.active { background: rgba(255,255,255,.35); }
+  .btn.jump { width: 90px; height: 90px; background: rgba(255,211,78,.25); border-color: rgba(255,211,78,.6); }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<div id="touch">
+  <div class="group">
+    <div class="btn" data-key="left">&#9664;</div>
+    <div class="btn" data-key="right">&#9654;</div>
+  </div>
+  <div class="group">
+    <div class="btn jump" data-key="jump">&#9650;</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// =====================================================================
+//  Pip's Leap: a small, original platform game in one file.
+//  Want to change the level? Edit buildLevel() below.
+// =====================================================================
+
+const TILE = 32, ROWS = 17, COLS = 140;
+const VW = 960, VH = ROWS * TILE; // 960 x 544 view
+const SOLID = new Set(['#', '=', '|']);
+
+// ---- Physics tuning ----
+const GRAV = 0.6, MAX_FALL = 14, ACC = 0.5, AIR_ACC = 0.35, FRICTION = 0.8;
+const MAX_SPEED = 4.6, JUMP_V = 13, STOMP_BOUNCE = 8;
+
+// ---------------------------------------------------------------------
+//  LEVEL. Row 0 is the top, row 16 the bottom. Ground is rows 15-16.
+//  #  ground / block      =  wooden platform     |  stone pillar
+//  ^  spikes              o  gem (collectible)
+// ---------------------------------------------------------------------
+function buildLevel() {
+  const g = Array.from({ length: ROWS }, () => Array(COLS).fill(' '));
+  const set = (x, y, c) => { if (x >= 0 && x < COLS && y >= 0 && y < ROWS) g[y][x] = c; };
+  const ground = (a, b) => { for (let x = a; x <= b; x++) { set(x, 15, '#'); set(x, 16, '#'); } };
+  const plat = (x, y, n) => { for (let i = 0; i < n; i++) set(x + i, y, '='); };
+  const pillar = (x, h) => { for (let i = 0; i < h; i++) { set(x, 14 - i, '|'); set(x + 1, 14 - i, '|'); } };
+  const stairs = (x, n, up = true) => {
+    for (let i = 0; i < n; i++) { const h = up ? i + 1 : n - i; for (let j = 0; j < h; j++) set(x + i, 14 - j, '#'); }
+  };
+  const gems = (x, y, n) => { for (let i = 0; i < n; i++) set(x + i, y, 'o'); };
+  const spikes = (x, n) => { for (let i = 0; i < n; i++) set(x + i, 14, '^'); };
+  const enemies = [];
+  const enemy = (x, y) => enemies.push({ x: x * TILE + 2, y: y * TILE + 10, w: 28, h: 22, vx: -1, vy: 0, onGround: false, alive: true, squish: 0 });
+
+  // Section 1: warm-up
+  ground(0, 24);
+  plat(8, 11, 4); gems(8, 10, 4);
+  enemy(14, 14);
+  plat(17, 9, 3); gems(17, 8, 3);
+  stairs(21, 4);
+  gems(25, 9, 3);                       // gems over the first gap
+
+  // Section 2: Grumbles and spikes
+  ground(28, 55);
+  enemy(33, 14); enemy(40, 14);
+  plat(36, 11, 5);
+  plat(43, 8, 4); gems(43, 7, 4);
+  spikes(48, 3); gems(48, 11, 3);
+  plat(52, 11, 3); gems(52, 10, 3);
+
+  // Section 3: pillars
+  ground(59, 90);
+  pillar(64, 2); enemy(67, 14);
+  pillar(70, 3); enemy(73, 14);
+  pillar(76, 2);
+  plat(79, 11, 6); gems(79, 10, 6); enemy(82, 10);
+  plat(92, 12, 2);                      // stepping stone over the wide gap
+
+  // Section 4: the final run
+  ground(95, 139);
+  enemy(100, 14); enemy(106, 14); enemy(112, 14);
+  plat(102, 11, 4); gems(102, 10, 4);
+  plat(108, 8, 4); gems(108, 7, 4);
+  stairs(118, 4); stairs(122, 4, false); gems(120, 9, 4);
+  for (let y = 0; y < 15; y++) set(COLS - 1, y, '#'); // end wall
+
+  // Pull gems out of the grid into objects
+  const gemList = [];
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    if (g[y][x] === 'o') { gemList.push({ x: x * TILE + 16, y: y * TILE + 16, taken: false }); g[y][x] = ' '; }
+  }
+  return {
+    grid: g, enemies, gems: gemList,
+    goal: { x: 132 * TILE, y: 13 * TILE, w: 32, h: 64 },
+    checkpoints: [3, 29, 60, 96],
+  };
+}
+
+// ---------------------------------------------------------------------
+//  Setup
+// ---------------------------------------------------------------------
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+let dpr = 1;
+function fit() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  const s = Math.min(window.innerWidth / VW, window.innerHeight / VH);
+  cv.width = Math.round(VW * dpr); cv.height = Math.round(VH * dpr);
+  cv.style.width = Math.floor(VW * s) + 'px'; cv.style.height = Math.floor(VH * s) + 'px';
+}
+window.addEventListener('resize', fit); fit();
+
+let level, grid, enemies, gems, goal;
+let state = 'title', tick = 0, score = 0, gemCount = 0, lives = 3, camX = 0, dieTimer = 0, muted = false;
+const P = { x: 0, y: 0, w: 24, h: 28, vx: 0, vy: 0, onGround: false, coyote: 0, buffer: 0, face: 1, land: 0, inv: 0, cp: 3 };
+
+const stars = Array.from({ length: 70 }, (_, i) => ({ x: (i * 137.5) % 2400, y: (i * 61.7) % 260, r: (i % 3) * 0.5 + 0.6 }));
+
+function newGame() {
+  level = buildLevel();
+  grid = level.grid; enemies = level.enemies; gems = level.gems; goal = level.goal;
+  score = 0; gemCount = 0; lives = 3; P.cp = level.checkpoints[0];
+  spawn(); camX = 0; state = 'play';
+}
+function spawn() {
+  P.x = P.cp * TILE + 4; P.y = 15 * TILE - P.h; P.vx = 0; P.vy = 0;
+  P.onGround = false; P.inv = 90; P.face = 1;
+}
+
+// ---------------------------------------------------------------------
+//  Input (keyboard + touch)
+// ---------------------------------------------------------------------
+const keys = { left: false, right: false, jump: false };
+let jumpPressed = false;
+const KEYMAP = { ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', ArrowUp: 'jump', KeyW: 'jump', Space: 'jump' };
+
+function press(k) { if (k === 'jump' && !keys.jump) jumpPressed = true; keys[k] = true; }
+function release(k) { keys[k] = false; }
+function startIfIdle() {
+  if (state === 'title' || state === 'over' || state === 'win') { newGame(); jumpPressed = false; return true; }
+  return false;
+}
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'KeyM') { muted = !muted; return; }
+  if (e.code === 'Enter' || e.code === 'Space') { if (startIfIdle()) { e.preventDefault(); return; } }
+  const k = KEYMAP[e.code];
+  if (k) { e.preventDefault(); if (!e.repeat) press(k); else keys[k] = true; }
+});
+window.addEventListener('keyup', e => { const k = KEYMAP[e.code]; if (k) release(k); });
+window.addEventListener('blur', () => { keys.left = keys.right = keys.jump = false; });
+
+const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (isTouch) document.getElementById('touch').style.display = 'flex';
+document.querySelectorAll('.btn').forEach(b => {
+  const k = b.dataset.key;
+  const down = e => { e.preventDefault(); if (startIfIdle()) return; press(k); b.classList.add('active'); };
+  const up = e => { e.preventDefault(); release(k); b.classList.remove('active'); };
+  b.addEventListener('pointerdown', down);
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => b.addEventListener(ev, up));
+});
+cv.addEventListener('pointerdown', () => startIfIdle());
+
+// ---------------------------------------------------------------------
+//  Sound (tiny synth beeps, press M to mute)
+// ---------------------------------------------------------------------
+let actx = null;
+const SFX = {
+  jump: [420, 720, 0.12, 'square'], gem: [880, 1400, 0.1, 'triangle'], stomp: [240, 80, 0.14, 'square'],
+  die: [440, 60, 0.6, 'sawtooth'], win: [520, 1300, 0.7, 'triangle'],
+};
+function sfx(name) {
+  if (muted) return;
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const [f0, f1, d, type] = SFX[name];
+    const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + d);
+    g.gain.setValueAtTime(0.07, t); g.gain.exponentialRampToValueAtTime(0.001, t + d);
+    o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d + 0.02);
+  } catch (e) { /* audio not available */ }
+}
+
+// ---------------------------------------------------------------------
+//  Collision helpers
+// ---------------------------------------------------------------------
+function tileAt(px, py) {
+  const cx = Math.floor(px / TILE), cy = Math.floor(py / TILE);
+  if (cx < 0 || cx >= COLS) return '#';
+  if (cy < 0 || cy >= ROWS) return ' ';
+  return grid[cy][cx];
+}
+const solidAt = (px, py) => SOLID.has(tileAt(px, py));
+
+function moveX(o) {
+  o.x += o.vx;
+  const top = o.y + 1, mid = o.y + o.h / 2, bot = o.y + o.h - 1;
+  if (o.vx > 0) {
+    const r = o.x + o.w - 0.01;
+    if (solidAt(r, top) || solidAt(r, mid) || solidAt(r, bot)) { o.x = Math.floor(r / TILE) * TILE - o.w; o.vx = 0; return true; }
+  } else if (o.vx < 0) {
+    const l = o.x;
+    if (solidAt(l, top) || solidAt(l, mid) || solidAt(l, bot)) { o.x = (Math.floor(l / TILE) + 1) * TILE; o.vx = 0; return true; }
+  }
+  return false;
+}
+function moveY(o) {
+  o.y += o.vy; o.onGround = false;
+  const l = o.x + 1, r = o.x + o.w - 1;
+  if (o.vy > 0) {
+    const b = o.y + o.h - 0.01;
+    if (solidAt(l, b) || solidAt(r, b)) { o.y = Math.floor(b / TILE) * TILE - o.h; o.vy = 0; o.onGround = true; }
+  } else if (o.vy < 0) {
+    const t = o.y;
+    if (solidAt(l, t) || solidAt(r, t)) { o.y = (Math.floor(t / TILE) + 1) * TILE; o.vy = 0; }
+  }
+}
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+function touchingSpikes() {
+  const x0 = Math.floor(P.x / TILE), x1 = Math.floor((P.x + P.w) / TILE);
+  const y0 = Math.floor(P.y / TILE), y1 = Math.floor((P.y + P.h) / TILE);
+  for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) {
+    if (cy >= 0 && cy < ROWS && cx >= 0 && cx < COLS && grid[cy][cx] === '^') {
+      if (overlap(P, { x: cx * TILE + 5, y: cy * TILE + 14, w: TILE - 10, h: TILE - 14 })) return true;
+    }
+  }
+  return false;
+}
+
+function die() {
+  if (state !== 'play') return;
+  state = 'dying'; dieTimer = 70; P.vy = -9; P.vx = 0; sfx('die');
+}
+
+// ---------------------------------------------------------------------
+//  Update (fixed 60 steps per second)
+// ---------------------------------------------------------------------
+function step() {
+  tick++;
+  if (state === 'dying') {
+    P.vy = Math.min(P.vy + GRAV, MAX_FALL); P.y += P.vy;
+    if (--dieTimer <= 0) { lives--; if (lives <= 0) state = 'over'; else { spawn(); state = 'play'; } }
+    return;
+  }
+  if (state !== 'play') return;
+
+  // --- Player movement ---
+  const a = P.onGround ? ACC : AIR_ACC;
+  if (keys.left) { P.vx -= a; P.face = -1; }
+  if (keys.right) { P.vx += a; P.face = 1; }
+  if (!keys.left && !keys.right) { P.vx *= P.onGround ? FRICTION : 0.96; if (Math.abs(P.vx) < 0.05) P.vx = 0; }
+  P.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, P.vx));
+
+  P.buffer = jumpPressed ? 8 : P.buffer - 1; jumpPressed = false;
+  P.coyote = P.onGround ? 6 : P.coyote - 1;
+  if (P.buffer > 0 && P.coyote > 0) { P.vy = -JUMP_V; P.buffer = 0; P.coyote = 0; sfx('jump'); }
+  if (!keys.jump && P.vy < -5) P.vy = -5; // let go early for a short hop
+
+  P.vy = Math.min(P.vy + GRAV, MAX_FALL);
+  const wasGround = P.onGround;
+  moveX(P); moveY(P);
+  if (P.onGround && !wasGround) P.land = 6;
+  if (P.land > 0) P.land--;
+  if (P.inv > 0) P.inv--;
+
+  // Checkpoints
+  for (const c of level.checkpoints) if (P.x >= c * TILE && c > P.cp) P.cp = c;
+
+  // Hazards
+  if (P.y > ROWS * TILE + 40) { die(); return; }
+  if (touchingSpikes()) { die(); return; }
+
+  // Gems
+  for (const g of gems) {
+    if (!g.taken && Math.abs(P.x + P.w / 2 - g.x) < 18 && Math.abs(P.y + P.h / 2 - g.y) < 20) {
+      g.taken = true; gemCount++; score += 10; sfx('gem');
+    }
+  }
+
+  // Enemies
+  const viewMid = camX + VW / 2;
+  for (const e of enemies) {
+    if (!e.alive) { e.squish--; continue; }
+    if (Math.abs(e.x - viewMid) > VW) continue; // asleep until near the screen
+    e.vy = Math.min(e.vy + GRAV, MAX_FALL);
+    const dir = e.vx;
+    if (moveX(e)) e.vx = -dir;
+    moveY(e);
+    if (e.onGround) { // turn around at ledges
+      const ahead = e.vx > 0 ? e.x + e.w + 1 : e.x - 1;
+      if (!solidAt(ahead, e.y + e.h + 2)) e.vx = -e.vx;
+    }
+    if (e.y > ROWS * TILE) { e.alive = false; e.squish = 0; continue; }
+
+    if (overlap(P, e)) {
+      if (P.vy > 0 && P.y + P.h - P.vy <= e.y + 10) {
+        e.alive = false; e.squish = 30; P.vy = -STOMP_BOUNCE; score += 100; sfx('stomp');
+      } else if (P.inv <= 0) { die(); return; }
+    }
+  }
+
+  // Goal
+  if (overlap(P, goal)) { state = 'win'; score += lives * 250; sfx('win'); }
+
+  // Camera
+  const target = Math.max(0, Math.min(COLS * TILE - VW, P.x + P.w / 2 - VW * 0.42));
+  camX += (target - camX) * 0.15;
+}
+
+// ---------------------------------------------------------------------
+//  Drawing
+// ---------------------------------------------------------------------
+function ellipse(x, y, rx, ry, fill) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); }
+
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, VH);
+  sky.addColorStop(0, '#24184a'); sky.addColorStop(0.55, '#6b3f8f'); sky.addColorStop(1, '#ff9f7a');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, VW, VH);
+
+  ctx.fillStyle = 'rgba(255,255,255,.8)';
+  for (const s of stars) {
+    const x = ((s.x - camX * 0.05) % 2400 + 2400) % 2400;
+    if (x < VW) { ctx.globalAlpha = 0.4 + 0.4 * Math.sin(tick * 0.03 + s.x); ctx.fillRect(x, s.y, s.r * 2, s.r * 2); }
+  }
+  ctx.globalAlpha = 1;
+  ellipse(780 - camX * 0.04, 150, 46, 46, 'rgba(255,214,130,.85)');
+
+  const ridge = (par, base, amp, freq, color, seed) => {
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(0, VH);
+    for (let x = 0; x <= VW + 16; x += 16) {
+      const wx = x + camX * par;
+      ctx.lineTo(x, base - (Math.sin(wx * freq + seed) * amp + Math.sin(wx * freq * 2.3 + seed * 2) * amp * 0.4));
+    }
+    ctx.lineTo(VW, VH); ctx.closePath(); ctx.fill();
+  };
+  ridge(0.15, 340, 60, 0.004, '#4a2f78', 1);
+  ridge(0.35, 410, 38, 0.008, '#2c5a6c', 3);
+}
+
+function drawTiles() {
+  const c0 = Math.max(0, Math.floor(camX / TILE) - 1), c1 = Math.min(COLS - 1, Math.ceil((camX + VW) / TILE) + 1);
+  for (let y = 0; y < ROWS; y++) for (let x = c0; x <= c1; x++) {
+    const t = grid[y][x], px = x * TILE, py = y * TILE;
+    const above = y > 0 ? grid[y - 1][x] : ' ';
+    if (t === '#') {
+      ctx.fillStyle = '#7a4a2b'; ctx.fillRect(px, py, TILE, TILE);
+      ctx.fillStyle = '#69401f';
+      ctx.fillRect(px + ((x * 7) % 20) + 4, py + ((y * 11) % 18) + 8, 4, 4);
+      ctx.fillRect(px + ((x * 13) % 18) + 6, py + ((y * 5) % 12) + 16, 3, 3);
+      if (above !== '#') {
+        ctx.fillStyle = '#5fd068'; ctx.fillRect(px, py, TILE, 8);
+        ctx.fillStyle = '#3fae4f'; ctx.fillRect(px, py + 8, TILE, 3);
+      }
+    } else if (t === '=') {
+      ctx.fillStyle = '#c98a4b'; ctx.fillRect(px, py, TILE, TILE);
+      ctx.fillStyle = '#9c6431'; ctx.fillRect(px, py + 15, TILE, 2); ctx.fillRect(px, py + TILE - 3, TILE, 3); ctx.fillRect(px + TILE - 2, py, 2, TILE);
+      ctx.fillStyle = '#e3aa6c'; ctx.fillRect(px, py, TILE, 3);
+    } else if (t === '|') {
+      ctx.fillStyle = '#8b90aa'; ctx.fillRect(px, py, TILE, TILE);
+      ctx.fillStyle = '#a9aec6'; ctx.fillRect(px + 3, py, 5, TILE);
+      ctx.fillStyle = '#6d7290'; ctx.fillRect(px, py + TILE - 3, TILE, 3);
+      if (above !== '|') { ctx.fillStyle = '#c3c7da'; ctx.fillRect(px - 1, py, TILE + 2, 6); }
+    } else if (t === '^') {
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath(); ctx.moveTo(px + i * 10 + 1, py + TILE); ctx.lineTo(px + i * 10 + 6, py + 12); ctx.lineTo(px + i * 10 + 11, py + TILE);
+        ctx.fillStyle = '#d9dbe8'; ctx.fill();
+      }
+    }
+  }
+}
+
+function drawGems() {
+  for (const g of gems) {
+    if (g.taken) continue;
+    const s = Math.max(0.15, Math.abs(Math.cos(tick * 0.06 + g.x * 0.01)));
+    ctx.save(); ctx.translate(g.x, g.y + Math.sin(tick * 0.08 + g.x) * 2); ctx.scale(s, 1);
+    ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(8, 0); ctx.lineTo(0, 10); ctx.lineTo(-8, 0); ctx.closePath();
+    ctx.fillStyle = '#ffd34e'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#fff3b0'; ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawEnemy(e) {
+  if (!e.alive && e.squish <= 0) return;
+  const d = e.vx >= 0 ? 1 : -1;
+  ctx.save(); ctx.translate(e.x + e.w / 2, e.y + e.h);
+  if (!e.alive) ctx.scale(1.25, 0.35);
+  ctx.strokeStyle = '#3a2266'; ctx.lineWidth = 2;
+  for (let i = -1; i <= 1; i++) {
+    const wig = e.alive ? Math.sin(tick * 0.3 + i) * 2 : 0;
+    ctx.beginPath(); ctx.moveTo(i * 7, -4); ctx.lineTo(i * 7 + wig, 0); ctx.stroke();
+  }
+  ellipse(0, -11, 14, 11, '#7d4fd1');
+  ellipse(-3, -16, 7, 3.5, '#a77ff2');
+  ellipse(-4 + d * 4, -11, 3.5, 4, '#fff'); ellipse(4 + d * 4, -11, 3.5, 4, '#fff');
+  ellipse(-4 + d * 5, -10, 1.6, 2, '#1b1631'); ellipse(4 + d * 5, -10, 1.6, 2, '#1b1631');
+  ctx.strokeStyle = '#1b1631'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-8 + d * 4, -17); ctx.lineTo(-1 + d * 4, -14); ctx.moveTo(8 + d * 4, -17); ctx.lineTo(1 + d * 4, -14); ctx.stroke();
+  ctx.restore();
+}
+
+function drawPip() {
+  if (state === 'play' && P.inv > 0 && Math.floor(tick / 4) % 2) return;
+  let sx = 1, sy = 1;
+  if (!P.onGround) { sy = 1 + Math.min(0.15, Math.abs(P.vy) * 0.012); sx = 1 / sy; }
+  if (P.land > 0) { sy = 1 - P.land * 0.03; sx = 1 + P.land * 0.03; }
+  const walk = P.onGround && Math.abs(P.vx) > 0.5 ? Math.sin(tick * 0.4) * 2 : 0;
+  ctx.save(); ctx.translate(P.x + P.w / 2, P.y + P.h); ctx.scale(sx, sy);
+  if (state === 'dying') ctx.rotate(Math.sin(tick * 0.5) * 0.3);
+  ellipse(-6, -1 - Math.max(0, walk), 5, 3, '#1f8f84'); ellipse(6, -1 - Math.max(0, -walk), 5, 3, '#1f8f84');
+  ctx.beginPath(); ctx.roundRect(-13, -29, 26, 27, 11); ctx.fillStyle = '#38d6c2'; ctx.fill();
+  ellipse(0, -10, 8, 6, '#c9fff5');
+  const ex = P.face * 3;
+  ellipse(-5 + ex, -20, 4, 5, '#fff'); ellipse(5 + ex, -20, 4, 5, '#fff');
+  ellipse(-5 + ex + P.face * 1.5, -19, 2, 2.6, '#1b1631'); ellipse(5 + ex + P.face * 1.5, -19, 2, 2.6, '#1b1631');
+  ctx.strokeStyle = '#2f8f3a'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, -29); ctx.lineTo(0, -35); ctx.stroke();
+  ctx.save(); ctx.translate(4, -36); ctx.rotate(-0.5 + Math.sin(tick * 0.1) * 0.15); ellipse(0, 0, 6, 3, '#6ee36a'); ctx.restore();
+  ctx.restore();
+}
+
+function drawGoal() {
+  const px = goal.x + 16, py = goal.y + 32;
+  for (let i = 3; i >= 0; i--) {
+    ctx.beginPath(); ctx.ellipse(px, py, 14 + i * 5, 28 + i * 5, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = `hsla(${(tick * 2 + i * 50) % 360}, 90%, 65%, ${0.9 - i * 0.18})`; ctx.lineWidth = 3; ctx.stroke();
+  }
+  ellipse(px, py, 12, 26, 'rgba(255,255,255,.25)');
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui, sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('EXIT', px, goal.y - 22 + Math.sin(tick * 0.08) * 3);
+}
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.roundRect(12, 10, 300, 36, 18); ctx.fill();
+  ctx.font = 'bold 18px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd34e'; ctx.fillText('◆ ' + gemCount, 28, 28);
+  ctx.fillStyle = '#fff'; ctx.fillText('Score ' + score, 100, 28);
+  ctx.fillStyle = '#ff6b8a'; ctx.fillText('♥'.repeat(Math.max(0, lives)), 230, 28);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function overlay(title, lines) {
+  ctx.fillStyle = 'rgba(20,12,40,.65)'; ctx.fillRect(0, 0, VW, VH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd34e'; ctx.font = 'bold 64px system-ui, sans-serif'; ctx.fillText(title, VW / 2, 190);
+  ctx.fillStyle = '#f4f0ff'; ctx.font = '22px system-ui, sans-serif';
+  lines.forEach((l, i) => ctx.fillText(l, VW / 2, 260 + i * 38));
+}
+
+function render() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!level) { // title before the first game: show a level preview
+    level = buildLevel(); grid = level.grid; enemies = level.enemies; gems = level.gems; goal = level.goal;
+    P.x = 3 * TILE + 4; P.y = 15 * TILE - P.h; P.onGround = true;
+  }
+  drawBackground();
+  ctx.save(); ctx.translate(-Math.round(camX), 0);
+  drawTiles(); drawGoal(); drawGems(); enemies.forEach(drawEnemy); drawPip();
+  ctx.restore();
+  if (state !== 'title') drawHUD();
+
+  const startHint = isTouch ? 'Tap to start' : 'Press Enter or Space to start';
+  if (state === 'title') overlay("Pip's Leap", [
+    'Run, jump, stomp the Grumbles and reach the EXIT.',
+    isTouch ? 'Use the on-screen buttons to move and jump.' : 'Arrows or A / D to move  ·  Space, W or ↑ to jump  ·  M to mute',
+    '', startHint,
+  ]);
+  if (state === 'over') overlay('Game over', ['Score ' + score + '  ·  Gems ' + gemCount, '', isTouch ? 'Tap to try again' : 'Press Enter to try again']);
+  if (state === 'win') overlay('You made it!', ['Score ' + score + '  ·  Gems ' + gemCount + ' of ' + gems.length, '', isTouch ? 'Tap to play again' : 'Press Enter to play again']);
+}
+
+// ---------------------------------------------------------------------
+//  Main loop
+// ---------------------------------------------------------------------
+let last = performance.now(), acc = 0;
+const STEP = 1000 / 60;
+function frame(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
