@@ -73,6 +73,11 @@ function buildLevel() {
   const gems = (x, y, n) => { for (let i = 0; i < n; i++) set(x + i, y, 'o'); };
   const spikes = (x, n) => { for (let i = 0; i < n; i++) set(x + i, 14, '^'); };
   const enemies = [];
+  // Moving clouds you can land on and ride. cx/cy = centre in tiles, w = width in tiles,
+  // range = how far it drifts (tiles), axis 'x' (side to side) or 'y' (up and down), speed = drift speed.
+  const clouds = [];
+  const cloud = (cx, cy, w, range, axis = 'x', speed = 0.012, phase = 0) =>
+    clouds.push({ x0: cx * TILE, y0: cy * TILE, w: w * TILE, h: 18, range: range * TILE, axis, speed, phase, x: 0, y: 0, dx: 0, dy: 0 });
   const enemy = (x, y) => enemies.push({ x: x * TILE + 2, y: y * TILE + 10, w: 28, h: 22, vx: -1, vy: 0, onGround: false, alive: true, squish: 0 });
 
   // Section 1: warm-up
@@ -107,13 +112,21 @@ function buildLevel() {
   stairs(118, 4); stairs(122, 4, false); gems(120, 9, 4);
   for (let y = 0; y < 15; y++) set(COLS - 1, y, '#'); // end wall
 
+  // Clouds: hop on and ride across the level
+  cloud(26, 11, 3, 1.5, 'x', 0.02);                     // over the first gap
+  cloud(49, 5, 3, 5, 'x', 0.010); gems(45, 4, 9);       // high road over the spikes
+  cloud(70, 6, 3, 6, 'x', 0.011, 1.2); gems(65, 5, 11); // sky route above the pillars
+  cloud(92, 10, 3, 3, 'x', 0.016, 0.5);                 // ferry over the wide gap
+  cloud(115, 9, 3, 3, 'y', 0.018);                      // cloud lift
+  gems(115, 4, 3);
+
   // Pull gems out of the grid into objects
   const gemList = [];
   for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
     if (g[y][x] === 'o') { gemList.push({ x: x * TILE + 16, y: y * TILE + 16, taken: false }); g[y][x] = ' '; }
   }
   return {
-    grid: g, enemies, gems: gemList,
+    grid: g, enemies, gems: gemList, clouds,
     goal: { x: 132 * TILE, y: 13 * TILE, w: 32, h: 64 },
     checkpoints: [3, 29, 60, 96],
   };
@@ -133,21 +146,23 @@ function fit() {
 }
 window.addEventListener('resize', fit); fit();
 
-let level, grid, enemies, gems, goal;
+let level, grid, enemies, gems, goal, clouds = [];
 let state = 'title', tick = 0, score = 0, gemCount = 0, lives = 3, camX = 0, dieTimer = 0, muted = false;
-const P = { x: 0, y: 0, w: 24, h: 28, vx: 0, vy: 0, onGround: false, coyote: 0, buffer: 0, face: 1, land: 0, inv: 0, cp: 3 };
+const P = { x: 0, y: 0, w: 24, h: 28, vx: 0, vy: 0, onGround: false, coyote: 0, buffer: 0, face: 1, land: 0, inv: 0, cp: 3, ride: null };
 
+// Drifting background clouds (scenery only)
+const skyClouds = Array.from({ length: 9 }, (_, i) => ({ x: (i * 311) % 2600, y: 40 + (i * 53) % 180, s: 0.7 + (i % 3) * 0.25, v: 0.15 + (i % 4) * 0.08 }));
 const stars = Array.from({ length: 70 }, (_, i) => ({ x: (i * 137.5) % 2400, y: (i * 61.7) % 260, r: (i % 3) * 0.5 + 0.6 }));
 
 function newGame() {
   level = buildLevel();
-  grid = level.grid; enemies = level.enemies; gems = level.gems; goal = level.goal;
+  grid = level.grid; enemies = level.enemies; gems = level.gems; goal = level.goal; clouds = level.clouds;
   score = 0; gemCount = 0; lives = 3; P.cp = level.checkpoints[0];
   spawn(); camX = 0; state = 'play';
 }
 function spawn() {
   P.x = P.cp * TILE + 4; P.y = 15 * TILE - P.h; P.vx = 0; P.vy = 0;
-  P.onGround = false; P.inv = 90; P.face = 1;
+  P.onGround = false; P.inv = 90; P.face = 1; P.ride = null;
 }
 
 // ---------------------------------------------------------------------
@@ -251,6 +266,19 @@ function touchingSpikes() {
   return false;
 }
 
+// Clouds are one-way: land on them from above, jump up through them.
+function landOnClouds() {
+  P.ride = null;
+  if (P.vy < 0) return;
+  const feet = P.y + P.h, prev = feet - P.vy - 1;
+  for (const c of clouds) {
+    const top = c.y - c.h / 2;
+    if (P.x + P.w > c.x - c.w / 2 + 4 && P.x < c.x + c.w / 2 - 4 && prev <= top + 2 && feet >= top - 1) {
+      P.y = top - P.h; P.vy = 0; P.onGround = true; P.ride = c; return;
+    }
+  }
+}
+
 function die() {
   if (state !== 'play') return;
   state = 'dying'; dieTimer = 70; P.vy = -9; P.vx = 0; sfx('die');
@@ -268,6 +296,18 @@ function step() {
   }
   if (state !== 'play') return;
 
+  // --- Clouds drift; whoever stands on one rides along ---
+  for (const c of clouds) {
+    const t = tick * c.speed + c.phase, nx = c.axis === 'x' ? c.x0 + Math.sin(t) * c.range : c.x0;
+    const ny = c.axis === 'y' ? c.y0 + Math.sin(t) * c.range : c.y0;
+    c.dx = c.x ? nx - c.x : 0; c.dy = c.y ? ny - c.y : 0; c.x = nx; c.y = ny;
+  }
+  if (P.ride) {
+    const c = P.ride, vx = P.vx;
+    P.vx = c.dx; moveX(P); P.vx = vx;
+    P.y = c.y - c.h / 2 - P.h;
+  }
+
   // --- Player movement ---
   const a = P.onGround ? ACC : AIR_ACC;
   if (keys.left) { P.vx -= a; P.face = -1; }
@@ -283,6 +323,7 @@ function step() {
   P.vy = Math.min(P.vy + GRAV, MAX_FALL);
   const wasGround = P.onGround;
   moveX(P); moveY(P);
+  landOnClouds();
   if (P.onGround && !wasGround) P.land = 6;
   if (P.land > 0) P.land--;
   if (P.inv > 0) P.inv--;
@@ -349,6 +390,11 @@ function drawBackground() {
   ctx.globalAlpha = 1;
   ellipse(780 - camX * 0.04, 150, 46, 46, 'rgba(255,214,130,.85)');
 
+  for (const k of skyClouds) {
+    const x = ((k.x - camX * 0.2 + tick * k.v) % 2600 + 2600) % 2600 - 160;
+    if (x > -200 && x < VW + 200) puff(x, k.y, 60 * k.s, 'rgba(255,255,255,.18)');
+  }
+
   const ridge = (par, base, amp, freq, color, seed) => {
     ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(0, VH);
     for (let x = 0; x <= VW + 16; x += 16) {
@@ -390,6 +436,20 @@ function drawTiles() {
         ctx.fillStyle = '#d9dbe8'; ctx.fill();
       }
     }
+  }
+}
+
+function puff(x, y, w, fill) {
+  ellipse(x, y, w * 0.5, w * 0.22, fill);
+  ellipse(x - w * 0.22, y - w * 0.08, w * 0.24, w * 0.2, fill);
+  ellipse(x + w * 0.12, y - w * 0.14, w * 0.28, w * 0.24, fill);
+}
+function drawClouds() {
+  for (const c of clouds) {
+    if (c.x + c.w < camX - 50 || c.x - c.w > camX + VW + 50) continue;
+    ellipse(c.x, c.y + 10, c.w * 0.45, 6, 'rgba(40,20,80,.25)');           // soft shadow
+    puff(c.x, c.y, c.w * 1.05, '#e9e6ff');
+    puff(c.x, c.y - 3, c.w * 0.95, '#ffffff');
   }
 }
 
@@ -474,12 +534,12 @@ function overlay(title, lines) {
 function render() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   if (!level) { // title before the first game: show a level preview
-    level = buildLevel(); grid = level.grid; enemies = level.enemies; gems = level.gems; goal = level.goal;
+    level = buildLevel(); grid = level.grid; enemies = level.enemies; gems = level.gems; goal = level.goal; clouds = level.clouds;
     P.x = 3 * TILE + 4; P.y = 15 * TILE - P.h; P.onGround = true;
   }
   drawBackground();
   ctx.save(); ctx.translate(-Math.round(camX), 0);
-  drawTiles(); drawGoal(); drawGems(); enemies.forEach(drawEnemy); drawPip();
+  drawTiles(); drawClouds(); drawGoal(); drawGems(); enemies.forEach(drawEnemy); drawPip();
   ctx.restore();
   if (state !== 'title') drawHUD();
 
